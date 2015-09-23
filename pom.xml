@@ -20,7 +20,7 @@
   	<distributionManagement>
 		<repository>
 			<id>mblox-repo</id>
-			<url>scp://mavensite.rm.mblox.com/home/maven/mblox-repo</url>
+			<url>scp://releaserepo.rm.mblox.com/home/maven/mblox-repo</url>
 		</repository>
 		<snapshotRepository>
 			<id>mblox-snapshot</id>
