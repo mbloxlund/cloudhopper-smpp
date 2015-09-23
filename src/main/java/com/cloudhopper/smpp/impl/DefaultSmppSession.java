@@ -1,5 +1,21 @@
 package com.cloudhopper.smpp.impl;
 
+import java.lang.management.ManagementFactory;
+import java.net.InetSocketAddress;
+import java.nio.channels.ClosedChannelException;
+import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+import javax.management.ObjectName;
+
+import org.jboss.netty.buffer.ChannelBuffer;
+import org.jboss.netty.channel.Channel;
+import org.jboss.netty.channel.ChannelFuture;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /*
  * #%L
  * ch-smpp
@@ -21,7 +37,6 @@ package com.cloudhopper.smpp.impl;
  */
 
 import com.cloudhopper.commons.util.PeriodFormatterUtil;
-import com.cloudhopper.smpp.jmx.DefaultSmppSessionMXBean;
 import com.cloudhopper.commons.util.windowing.DuplicateKeyException;
 import com.cloudhopper.commons.util.windowing.OfferTimeoutException;
 import com.cloudhopper.commons.util.windowing.Window;
@@ -30,12 +45,11 @@ import com.cloudhopper.commons.util.windowing.WindowListener;
 import com.cloudhopper.smpp.SmppBindType;
 import com.cloudhopper.smpp.SmppConstants;
 import com.cloudhopper.smpp.SmppServerSession;
-import com.cloudhopper.smpp.type.SmppChannelException;
 import com.cloudhopper.smpp.SmppSessionConfiguration;
 import com.cloudhopper.smpp.SmppSessionCounters;
 import com.cloudhopper.smpp.SmppSessionHandler;
 import com.cloudhopper.smpp.SmppSessionListener;
-import com.cloudhopper.smpp.type.SmppTimeoutException;
+import com.cloudhopper.smpp.jmx.DefaultSmppSessionMXBean;
 import com.cloudhopper.smpp.pdu.BaseBind;
 import com.cloudhopper.smpp.pdu.BaseBindResp;
 import com.cloudhopper.smpp.pdu.EnquireLink;
@@ -53,27 +67,16 @@ import com.cloudhopper.smpp.transcoder.DefaultPduTranscoderContext;
 import com.cloudhopper.smpp.transcoder.PduTranscoder;
 import com.cloudhopper.smpp.type.RecoverablePduException;
 import com.cloudhopper.smpp.type.SmppBindException;
+import com.cloudhopper.smpp.type.SmppChannelException;
+import com.cloudhopper.smpp.type.SmppTimeoutException;
 import com.cloudhopper.smpp.type.UnrecoverablePduException;
 import com.cloudhopper.smpp.util.SequenceNumber;
 import com.cloudhopper.smpp.util.SmppSessionUtil;
 import com.cloudhopper.smpp.util.SmppUtil;
-import java.lang.management.ManagementFactory;
-import java.net.InetSocketAddress;
-import java.nio.channels.ClosedChannelException;
-import java.util.Map;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import javax.management.ObjectName;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelFuture;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Default implementation of either an ESME or SMSC SMPP session.
- * 
+ *
  * @author joelauer (twitter: @jjlauer or <a href="http://twitter.com/jjlauer" target=window>http://twitter.com/jjlauer</a>)
  */
 public class DefaultSmppSession implements SmppServerSession, SmppSessionChannelListener, WindowListener<Integer,PduRequest,PduResponse>, DefaultSmppSessionMXBean {
@@ -115,7 +118,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     }
 
     /**
-     * Creates an SmppSession for a client-based session. It is <b>NOT</b> 
+     * Creates an SmppSession for a client-based session. It is <b>NOT</b>
      * recommended that this constructor is called directly.  The recommended
      * way to construct a session is either via a DefaultSmppClient or
      * DefaultSmppServer.  This constructor will cause monitoring to be disabled.
@@ -128,13 +131,13 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     public DefaultSmppSession(Type localType, SmppSessionConfiguration configuration, Channel channel, SmppSessionHandler sessionHandler) {
         this(localType, configuration, channel, sessionHandler, null);
     }
-    
-    
+
+
     /**
-     * Creates an SmppSession for a client-based session. It is <b>NOT</b> 
+     * Creates an SmppSession for a client-based session. It is <b>NOT</b>
      * recommended that this constructor is called directly.  The recommended
      * way to construct a session is either via a DefaultSmppClient or
-     * DefaultSmppServer. 
+     * DefaultSmppServer.
      * @param localType The type of local endpoint (ESME vs. SMSC)
      * @param configuration The session configuration
      * @param channel The channel associated with this session. The channel
@@ -155,7 +158,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         // always "wrap" the custom pdu transcoder context with a default one
         this.transcoder = new DefaultPduTranscoder(new DefaultPduTranscoderContext(this.sessionHandler));
         this.monitorExecutor = monitorExecutor;
-        
+
         // different ways to construct the window if monitoring is enabled
         if (monitorExecutor != null && configuration.getWindowMonitorInterval() > 0) {
             // enable send window monitoring, verify if the monitoringInterval has been set
@@ -163,7 +166,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         } else {
             this.sendWindow = new Window<Integer,PduRequest,PduResponse>(configuration.getWindowSize());
         }
-        
+
         // these server-only items are null
         this.server = null;
         this.serverSessionId = null;
@@ -172,7 +175,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             this.counters = new DefaultSmppSessionCounters();
         }
     }
-    
+
     public void registerMBean(String objectName) {
         // register the this queue manager as an mbean
         try {
@@ -183,7 +186,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             logger.error("Unable to register DefaultSmppSessionMXBean [{}]", objectName, e);
         }
     }
-    
+
     public void unregisterMBean(String objectName) {
         // register the this queue manager as an mbean
         try {
@@ -194,7 +197,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             logger.error("Unable to unregister DefaultSmppServerMXBean [{}]", objectName, e);
         }
     }
-        
+
     @Override
     public SmppBindType getBindType() {
         return this.configuration.getType();
@@ -289,7 +292,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     protected PduTranscoder getTranscoder() {
         return this.transcoder;
     }
-    
+
     @Override
     public Window<Integer,PduRequest,PduResponse> getRequestWindow() {
         return getSendWindow();
@@ -299,12 +302,12 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     public Window<Integer,PduRequest,PduResponse> getSendWindow() {
         return this.sendWindow;
     }
-    
+
     @Override
     public boolean hasCounters() {
         return (this.counters != null);
     }
-    
+
     @Override
     public SmppSessionCounters getCounters() {
         return this.counters;
@@ -419,7 +422,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         }
         this.state.set(STATE_CLOSED);
     }
-    
+
     @Override
     public void destroy() {
         close();
@@ -448,7 +451,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         SmppSessionUtil.assertExpectedResponse(request, response);
         return (SubmitSmResp)response;
     }
-    
+
     protected void assertValidRequest(PduRequest request) throws NullPointerException, RecoverablePduException, UnrecoverablePduException {
         if (request == null) {
             throw new NullPointerException("PDU request cannot be null");
@@ -463,14 +466,14 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     protected PduResponse sendRequestAndGetResponse(PduRequest requestPdu, long timeoutInMillis) throws RecoverablePduException, UnrecoverablePduException, SmppTimeoutException, SmppChannelException, InterruptedException {
         WindowFuture<Integer,PduRequest,PduResponse> future = sendRequestPdu(requestPdu, timeoutInMillis, true);
         boolean completedWithinTimeout = future.await();
-        
+
         if (!completedWithinTimeout) {
             // since this is a "synchronous" request and it timed out, we don't
             // want it eating up valuable window space - cancel it before returning exception
             future.cancel();
             throw new SmppTimeoutException("Unable to get response within [" + timeoutInMillis + " ms]");
         }
-        
+
         // 3 possible scenarios once completed: success, failure, or cancellation
         if (future.isSuccess()) {
             return future.getResponse();
@@ -507,7 +510,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         } catch (OfferTimeoutException e) {
             throw new SmppTimeoutException(e.getMessage(), e);
         }
-        
+
         if(this.sessionHandler instanceof SmppSessionListener) {
             if(!((SmppSessionListener)this.sessionHandler).firePduDispatch(pdu)) {
                 logger.info("dispatched request PDU discarded: {}", pdu);
@@ -527,14 +530,19 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         }
 
         // write the pdu out & wait timeout amount of time
-	ChannelFuture channelFuture = this.channel.write(buffer).await();
+        ChannelFuture channelFuture = this.channel.write(buffer);
+        boolean timedOut = !channelFuture.await(timeoutMillis);
+
+        if (timedOut) {
+        	throw new SmppChannelException("Send timed out for PDU: " + pdu);
+        }
 
         // check if the write was a success
         if (!channelFuture.isSuccess()) {
             // the write failed, make sure to throw an exception
             throw new SmppChannelException(channelFuture.getCause().getMessage(), channelFuture.getCause());
         }
-        
+
         this.countSendRequestPdu(pdu);
 
         return future;
@@ -555,7 +563,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         if (!pdu.hasSequenceNumberAssigned()) {
             pdu.setSequenceNumber(this.sequenceNumber.next());
         }
-        
+
         if(this.sessionHandler instanceof SmppSessionListener) {
             if(!((SmppSessionListener)this.sessionHandler).firePduDispatch(pdu)) {
                 logger.info("dispatched response PDU discarded: {}", pdu);
@@ -599,18 +607,18 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         if (pdu instanceof PduRequest) {
             // process this request and allow the handler to return a result
             PduRequest requestPdu = (PduRequest)pdu;
-            
+
             this.countReceiveRequestPdu(requestPdu);
-            
+
             long startTime = System.currentTimeMillis();
             PduResponse responsePdu = this.sessionHandler.firePduRequestReceived(requestPdu);
-            
+
             // if the handler returned a non-null object, then we need to send it back on the channel
             if (responsePdu != null) {
                 try {
                     long responseTime = System.currentTimeMillis() - startTime;
                     this.countSendResponsePdu(responsePdu, responseTime, responseTime);
-                    
+
                     this.sendResponsePdu(responsePdu);
                 } catch (Exception e) {
                     logger.error("Unable to cleanly return response PDU: {}", e);
@@ -620,23 +628,23 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             // this is a response -- we need to check if its "expected" or "unexpected"
             PduResponse responsePdu = (PduResponse)pdu;
             int receivedPduSeqNum = pdu.getSequenceNumber();
-            
+
             try {
                 // see if a correlating request exists in the window
                 WindowFuture<Integer,PduRequest,PduResponse> future = this.sendWindow.complete(receivedPduSeqNum, responsePdu);
                 if (future != null) {
                     logger.trace("Found a future in the window for seqNum [{}]", receivedPduSeqNum);
                     this.countReceiveResponsePdu(responsePdu, future.getOfferToAcceptTime(), future.getAcceptToDoneTime(), (future.getAcceptToDoneTime() / future.getWindowSize()));
-                    
+
                     // if this isn't null, we found a match to a request
                     int callerStateHint = future.getCallerStateHint();
                     //logger.trace("IsCallerWaiting? " + future.isCallerWaiting() + " callerStateHint=" + callerStateHint);
                     if (callerStateHint == WindowFuture.CALLER_WAITING) {
-                        logger.trace("Caller waiting for request: {}", future.getRequest()); 
+                        logger.trace("Caller waiting for request: {}", future.getRequest());
                         // if a caller is waiting, nothing extra needs done as calling thread will handle the response
                         return;
                     } else if (callerStateHint == WindowFuture.CALLER_NOT_WAITING) {
-                        logger.trace("Caller not waiting for request: {}", future.getRequest()); 
+                        logger.trace("Caller not waiting for request: {}", future.getRequest());
                         // this was an "expected" response - wrap it into an async response
                         this.sessionHandler.fireExpectedPduResponseReceived(new DefaultPduAsyncResponse(future));
                         return;
@@ -647,7 +655,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
                     }
                 } else {
                     this.countReceiveResponsePdu(responsePdu, 0, 0, 0);
-                    
+
                     // original request either expired OR was completely unexpected
                     this.sessionHandler.fireUnexpectedPduResponseReceived(responsePdu);
                 }
@@ -682,7 +690,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         if (this.server != null) {
             this.server.destroySession(serverSessionId, this);
         }
-        
+
         // most of the time when a channel is closed, we don't necessarily want
         // to do anything special -- however when a caller is waiting for a response
         // to a request and we know the channel closed, we should check for those
@@ -722,7 +730,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
         if (this.counters == null) {
             return;     // noop
         }
-        
+
         if (pdu.isRequest()) {
             switch (pdu.getCommandId()) {
                 case SmppConstants.CMD_ID_SUBMIT_SM:
@@ -740,12 +748,12 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             }
         }
     }
-    
+
     private void countSendResponsePdu(PduResponse pdu, long responseTime, long estimatedProcessingTime) {
         if (this.counters == null) {
             return;     // noop
         }
-        
+
         if (pdu.isResponse()) {
             switch (pdu.getCommandId()) {
                 case SmppConstants.CMD_ID_SUBMIT_SM_RESP:
@@ -775,12 +783,12 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             }
         }
     }
-    
+
     private void countSendRequestPduExpired(PduRequest pdu) {
         if (this.counters == null) {
             return;     // noop
         }
-        
+
         if (pdu.isRequest()) {
             switch (pdu.getCommandId()) {
                 case SmppConstants.CMD_ID_SUBMIT_SM:
@@ -798,12 +806,12 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             }
         }
     }
-    
+
     private void countReceiveRequestPdu(PduRequest pdu) {
         if (this.counters == null) {
             return;     // noop
         }
-        
+
         if (pdu.isRequest()) {
             switch (pdu.getCommandId()) {
                 case SmppConstants.CMD_ID_SUBMIT_SM:
@@ -821,12 +829,12 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             }
         }
     }
-    
+
     private void countReceiveResponsePdu(PduResponse pdu, long waitTime, long responseTime, long estimatedProcessingTime) {
         if (this.counters == null) {
             return;     // noop
         }
-        
+
         if (pdu.isResponse()) {
             switch (pdu.getCommandId()) {
                 case SmppConstants.CMD_ID_SUBMIT_SM_RESP:
@@ -860,7 +868,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             }
         }
     }
-    
+
     // mainly for JMX management
 
     @Override
@@ -869,7 +877,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
             this.counters.reset();
         }
     }
-    
+
     @Override
     public String getBindTypeName() {
         return this.getBindType().toString();
@@ -949,12 +957,12 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     public boolean isWindowMonitorEnabled() {
         return (this.monitorExecutor != null && this.configuration.getWindowMonitorInterval() > 0);
     }
-    
+
     @Override
     public long getWindowMonitorInterval() {
         return this.configuration.getWindowMonitorInterval();
     }
-    
+
     @Override
     public int getMaxWindowSize() {
         return this.sendWindow.getMaxSize();
@@ -969,7 +977,7 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     public long getWindowWaitTimeout() {
         return this.configuration.getWindowWaitTimeout();
     }
-    
+
     @Override
     public String[] dumpWindow() {
         Map<Integer,WindowFuture<Integer,PduRequest,PduResponse>> sortedSnapshot = this.sendWindow.createSortedSnapshot();
@@ -1021,22 +1029,22 @@ public class DefaultSmppSession implements SmppServerSession, SmppSessionChannel
     public String getTxSubmitSMCounter() {
         return hasCounters() ? this.counters.getTxSubmitSM().toString() : null;
     }
-    
+
     @Override
     public void enableLogBytes() {
         this.configuration.getLoggingOptions().setLogBytes(true);
     }
-    
+
     @Override
     public void disableLogBytes() {
         this.configuration.getLoggingOptions().setLogBytes(false);
     }
-    
+
     @Override
     public void enableLogPdu() {
         this.configuration.getLoggingOptions().setLogPdu(true);
     }
-    
+
     @Override
     public void disableLogPdu() {
         this.configuration.getLoggingOptions().setLogPdu(false);
